@@ -10,6 +10,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../core/app_info.dart';
 import '../../core/categories.dart';
+import '../../services/google_drive_backup_service.dart';
 import '../../state/lock_hold.dart';
 import '../../state/session.dart';
 import '../../state/settings.dart';
@@ -142,6 +143,8 @@ class SettingsPage extends ConsumerWidget {
               );
             },
           ),
+          const _SectionLabel('Google Drive'),
+          const _GoogleDriveBackupSection(),
           const _SectionLabel('Backup'),
           ListTile(
             title: const Text('Export encrypted backup'),
@@ -371,6 +374,8 @@ class SettingsPage extends ConsumerWidget {
       ),
     );
     if (ok == true) {
+      // Drop Drive session so a new vault can pick any Gmail on the phone.
+      await GoogleDriveBackupService.signOut();
       await ref.read(sessionProvider.notifier).destroyVault();
     }
   }
@@ -471,6 +476,191 @@ class _SectionLabel extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
       child: Text(text, style: Theme.of(context).textTheme.titleSmall),
+    );
+  }
+}
+
+class _GoogleDriveBackupSection extends ConsumerStatefulWidget {
+  const _GoogleDriveBackupSection();
+
+  @override
+  ConsumerState<_GoogleDriveBackupSection> createState() =>
+      _GoogleDriveBackupSectionState();
+}
+
+class _GoogleDriveBackupSectionState
+    extends ConsumerState<_GoogleDriveBackupSection> {
+  String? _account;
+  bool _busy = false;
+  String _status = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshUser();
+  }
+
+  Future<void> _refreshUser() async {
+    try {
+      final user = await GoogleDriveBackupService.currentUser();
+      if (!mounted) return;
+      setState(() => _account = user?.email ?? user?.displayName);
+    } catch (_) {}
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _connect() async {
+    setState(() {
+      _busy = true;
+      _status = 'Signing in…';
+    });
+    try {
+      // Always show the phone's Google account list (not the last cached Gmail).
+      final user =
+          await GoogleDriveBackupService.signIn(forceAccountPicker: true);
+      if (!mounted) return;
+      setState(() => _account = user?.email ?? user?.displayName);
+      _toast(user == null ? 'Sign-in cancelled' : 'Connected: $_account');
+    } catch (e) {
+      _toast(e.toString());
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _status = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _disconnect() async {
+    await GoogleDriveBackupService.signOut();
+    if (!mounted) return;
+    setState(() => _account = null);
+    _toast('Google Drive disconnected');
+  }
+
+  Future<void> _upload() async {
+    setState(() {
+      _busy = true;
+      _status = 'Building backup…';
+    });
+    try {
+      await ref.withLockHold(() async {
+        final bytes =
+            await ref.read(sessionProvider.notifier).exportBackup();
+        await GoogleDriveBackupService.uploadBackup(
+          bytes,
+          onStatus: (s) {
+            if (mounted) setState(() => _status = s);
+          },
+        );
+      });
+      _toast('Synced to Google Drive');
+    } catch (e) {
+      _toast(e.toString());
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _status = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _download() async {
+    if (!await confirmRestoreBackup(context)) return;
+    setState(() {
+      _busy = true;
+      _status = 'Downloading…';
+    });
+    try {
+      await ref.withLockHold(() async {
+        final bytes = await GoogleDriveBackupService.downloadBackup(
+          onStatus: (s) {
+            if (mounted) setState(() => _status = s);
+          },
+        );
+        if (!mounted) return;
+        await applyBackupBytes(context, ref, bytes);
+      });
+    } catch (e) {
+      _toast(e.toString());
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _status = '';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = _account != null && _account!.isNotEmpty;
+    return Column(
+      children: [
+        ListTile(
+          leading: const Icon(Icons.cloud_outlined),
+          title: Text(connected ? 'Connected: $_account' : 'Connect Google Drive'),
+          subtitle: Text(
+            connected
+                ? 'Encrypted vault sync (same Google account as Budget)'
+                : 'Sign in to upload / restore Amanaat backups',
+          ),
+          trailing: connected
+              ? Wrap(
+                  spacing: 4,
+                  children: [
+                    TextButton(
+                      onPressed: _busy ? null : _connect,
+                      child: const Text('Switch'),
+                    ),
+                    TextButton(
+                      onPressed: _busy ? null : _disconnect,
+                      child: const Text('Disconnect'),
+                    ),
+                  ],
+                )
+              : null,
+          onTap: _busy ? null : (connected ? null : _connect),
+        ),
+        if (_busy)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text(_status.isEmpty ? 'Working…' : _status)),
+              ],
+            ),
+          ),
+        ListTile(
+          enabled: !_busy,
+          leading: const Icon(Icons.cloud_upload_outlined),
+          title: const Text('Upload backup to Drive'),
+          subtitle: const Text('Creates Amanaat_….amanahbak on your Drive'),
+          onTap: _busy ? null : _upload,
+        ),
+        ListTile(
+          enabled: !_busy,
+          leading: const Icon(Icons.cloud_download_outlined),
+          title: const Text('Restore from Drive'),
+          subtitle: const Text('Latest Amanaat backup · replaces this vault'),
+          onTap: _busy ? null : _download,
+        ),
+      ],
     );
   }
 }

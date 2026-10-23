@@ -172,8 +172,8 @@ class RecordDetailPage extends ConsumerWidget {
                     );
                   }
                 },
-                onOpen: field.fieldType == FieldKind.url.name
-                    ? () => _openUrl(field.value)
+                onOpen: _isOpenableUrlField(field)
+                    ? () => _openUrl(context, field.value)
                     : null,
               ),
           if (item.attachments.isNotEmpty) ...[
@@ -216,14 +216,46 @@ class RecordDetailPage extends ConsumerWidget {
     );
   }
 
-  Future<void> _openUrl(String raw) async {
+  /// Website / URL fields — Logins "website" key or any url-type field.
+  static bool _isOpenableUrlField(VaultField field) {
+    if (field.value.trim().isEmpty) return false;
+    if (field.fieldType == FieldKind.url.name) return true;
+    final key = field.key.toLowerCase();
+    if (key == 'website' || key == 'url' || key == 'link') return true;
+    final label = field.label.toLowerCase();
+    if (label.contains('website') || label == 'url') return true;
+    return false;
+  }
+
+  static Future<void> _openUrl(BuildContext context, String raw) async {
     var value = raw.trim();
-    if (!value.startsWith('http')) {
+    if (value.isEmpty) return;
+    // Strip accidental spaces / wrap plain domains.
+    if (!value.contains('://')) {
       value = 'https://$value';
     }
     final uri = Uri.tryParse(value);
-    if (uri != null) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (uri == null || !(uri.hasScheme && uri.host.isNotEmpty)) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Invalid website: $raw')),
+        );
+      }
+      return;
+    }
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open website')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Open failed: $e')),
+        );
+      }
     }
   }
 }
@@ -249,10 +281,19 @@ class _FieldTileState extends State<_FieldTile> {
   @override
   Widget build(BuildContext context) {
     final value = _hidden ? '••••••••' : widget.field.value;
+    final isLink = widget.onOpen != null && !_hidden;
     return Card(
       child: ListTile(
+        onTap: widget.onOpen,
         title: Text(widget.field.label),
-        subtitle: Text(value, style: const TextStyle(letterSpacing: 0.3)),
+        subtitle: Text(
+          value,
+          style: TextStyle(
+            letterSpacing: 0.3,
+            color: isLink ? Theme.of(context).colorScheme.primary : null,
+            decoration: isLink ? TextDecoration.underline : null,
+          ),
+        ),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -267,8 +308,9 @@ class _FieldTileState extends State<_FieldTile> {
               ),
             if (widget.onOpen != null)
               IconButton(
+                tooltip: 'Open website',
                 onPressed: widget.onOpen,
-                icon: const Icon(Icons.open_in_new),
+                icon: const Icon(Icons.open_in_browser_rounded),
               ),
             IconButton(
               onPressed: widget.onCopy,
